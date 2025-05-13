@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+.watchlist-title  {
+    position: relative;
+    width: 100%;
+    text-align: center;
+}
