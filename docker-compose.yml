@@ -1,0 +1,43 @@
+  services:
+    db:
+      image: mysql:8
+      environment:
+        MYSQL_ROOT_PASSWORD: KhaTruong271206.!
+        MYSQL_DATABASE: user_logins
+      ports:
+        - "3307:3306"
+      volumes:
+        - db_data:/var/lib/mysql
+      healthcheck:
+        test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pKhaTruong271206.!"]
+        interval: 5s
+        retries: 10
+
+    backend:
+      build: ./backend
+      environment:
+        DATABASE_URL: mysql+mysqlconnector://root:KhaTruong271206.!@db/user_logins
+        SECRET_KEY: ${SECRET_KEY}
+        TMDB_API_KEY: ${TMDB_API_KEY}
+      ports:
+        - "5000:5000"
+      depends_on:
+        db:
+          condition: service_healthy
+      # Optional: keep the big pickles outside the image
+      # volumes:
+      #   - ./backend/movies_list.pkl:/app/movies_list.pkl:ro
+      #   - ./backend/similarity.pkl:/app/similarity.pkl:ro
+
+    frontend:
+      build:
+        context: ./frontend
+        args:
+          VITE_API_URL: http://localhost:5000
+      ports:
+        - "3000:80"
+      depends_on:
+        - backend
+
+  volumes:
+    db_data:

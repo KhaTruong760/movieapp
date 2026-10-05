@@ -1,8 +1,6 @@
-import { Link } from "react-router-dom";
+import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useState, useEffect, useRef } from "react";
 import { authService } from '../services/auth';
-import { useNavigate } from 'react-router-dom';
-import "../css/Navbar.css";
 
 function NavBar() {
     const navigate = useNavigate();
@@ -42,61 +40,49 @@ function NavBar() {
         setIsDropdownOpen(!isDropdownOpen);
     };
 
+    const name = authService.getName?.() || 'User';
+    const initial = name.charAt(0).toUpperCase();
+
+    const linkClass = ({ isActive }) =>
+        `text-sm font-medium tracking-wide transition-colors ${
+            isActive ? 'text-accent' : 'text-muted hover:text-text'
+        }`;
+
     return (
-        <nav className="flex justify-between items-center h-[60px] sticky top-0 z-50 bg-white px-4 md:px-8">
-            <div className="text-xl font-bold">
-                <Link to="/">Movie App</Link>
-            </div>
-            <ul className="flex items-center gap-4 md:gap-8">
-                <li>
-                    <Link to="/" className="hover:text-gray-400 transition-colors duration-200">
-                        HOME
-                    </Link>
-                </li>
-                <li>
-                    <Link to="/favorites" className="hover:text-gray-400 transition-colors duration-200">
-                        FAVORITES
-                    </Link>
-                </li>
-                <li>
-                    <Link to="/watchlist" className="hover:text-gray-400 transition-colors duration-200">
-                        WATCHLIST
-                    </Link>
-                </li>
-                <li>
-                    <Link to="/viewed" className="hover:text-gray-400 transition-colors duration-200">
-                        VIEWED
-                    </Link>
-                </li>
+        <nav className="sticky top-0 z-50 flex justify-between items-center h-[64px] bg-surface/90 backdrop-blur border-b border-border px-4 md:px-8">
+            <Link to="/" className="text-xl font-bold text-text">
+                Movie<span className="text-accent">App</span>
+            </Link>
+            <ul className="flex items-center gap-4 md:gap-6">
+                <li><NavLink to="/" end className={linkClass}>HOME</NavLink></li>
+                <li><NavLink to="/favorites" className={linkClass}>FAVORITES</NavLink></li>
+                <li><NavLink to="/watchlist" className={linkClass}>WATCHLIST</NavLink></li>
+                <li><NavLink to="/viewed" className={linkClass}>VIEWED</NavLink></li>
+                <li><NavLink to="/recommend" className={linkClass}>RECOMMEND</NavLink></li>
                 {loggedIn ? (
                     <div className="relative" ref={dropdownRef}>
                         <button
                             onClick={toggleDropdown}
-                            className="flex items-center gap-2 bg-gradient-to-t from-[#C4DDFE] to-[#FFECFB] rounded-[15px] px-4 py-3 hover:bg-gray-200 transition-colors duration-200"
+                            className="flex items-center gap-2 rounded-full pl-1 pr-3 py-1 hover:bg-surface-2 transition-colors"
                         >
-                            <span className="text-sm font-medium">
-                                {authService.getName() || 'User'}
+                            <span className="w-8 h-8 rounded-full bg-accent text-bg font-semibold flex items-center justify-center text-sm">
+                                {initial}
                             </span>
+                            <span className="text-sm text-text hidden sm:inline">{name}</span>
                             <svg
-                                className={`w-4 h-4 transform ${isDropdownOpen ? 'rotate-180' : ''}`}
+                                className={`w-4 h-4 text-muted transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`}
                                 fill="none"
                                 stroke="currentColor"
                                 viewBox="0 0 24 24"
-                                xmlns="http://www.w3.org/2000/svg"
                             >
-                                <path
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                    strokeWidth="2"
-                                    d="M19 9l-7 7-7-7"
-                                />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
                             </svg>
                         </button>
                         {isDropdownOpen && (
-                             <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg py-2">
+                             <div className="absolute right-0 mt-2 w-48 bg-surface-2 border border-border rounded-lg shadow-xl py-1 overflow-hidden">
                                 <button
                                     onClick={handleLogout}
-                                    className="w-full text-left px-4 py-2 text-sm hover:bg-gray-200 transition-colors duration-200"
+                                    className="w-full text-left px-4 py-2 text-sm text-text hover:bg-surface transition-colors"
                                 >
                                     Sign Out
                                 </button>
@@ -106,7 +92,7 @@ function NavBar() {
                 ) : (
                     <button
                         onClick={handleLogin}
-                        className="bg-[#a6c1ee] text-white px-5 py-2 rounded-full hover:bg-[#87acec] transition-colors duration-200"
+                        className="bg-accent text-bg font-medium px-5 py-2 rounded-full hover:bg-accent-hover transition-colors"
                     >
                         Sign In
                     </button>

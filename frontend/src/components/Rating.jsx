@@ -1,6 +1,7 @@
 import { FaStar } from "react-icons/fa";
 import axios from "axios";
 import { useState, useEffect } from "react";
+import { API_URL } from "../services/api";
 
 const StarRating = ({ movieID, initialRating }) => {
   const [rating, setRating] = useState(initialRating);
@@ -23,7 +24,7 @@ const StarRating = ({ movieID, initialRating }) => {
       }
 
       try {
-        const response = await axios.get(`http://localhost:5000/api/rating/${movieID}`, {
+        const response = await axios.get(`${API_URL}/api/rating/${movieID}`, {
           withCredentials: true
         });
         if (response.data && response.data.userRating !== undefined) {
@@ -52,7 +53,7 @@ const StarRating = ({ movieID, initialRating }) => {
       console.info("Sending rating update:", { movieID, rating: newRating });
       
       const response = await axios.post(
-        "http://localhost:5000/api/rating/update",
+        `${API_URL}/api/rating/update`,
         {
           movieID: Number(movieID),
           rating: Number(newRating)
@@ -92,7 +93,7 @@ const StarRating = ({ movieID, initialRating }) => {
                 size={17}
                 onMouseEnter={() => setHover(ratingValue)}
                 onMouseOut={() => setHover(null)}
-                color={ratingValue <= (hover || rating) ? "#ffc107" : "#e4e5e9"}
+                color={ratingValue <= (hover || rating) ? "var(--color-accent)" : "var(--color-border)"}
               />
             </label>
           );

@@ -1,0 +1,11 @@
+  fastapi
+  uvicorn[standard]
+  sqlalchemy
+  mysql-connector-python
+  bcrypt
+  python-dotenv
+  requests
+  pandas
+  numpy
+  itsdangerous          # required by SessionMiddleware
+  alembic               # you have migrations/

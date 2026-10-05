@@ -1,7 +1,8 @@
 // src/services/auth.js - Authentication service
 import axios from 'axios';
+import { API_URL as BASE_URL } from './api';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = `${BASE_URL}/api`;
 
 // Configure axios to include credentials (cookies)
 axios.defaults.withCredentials = true;

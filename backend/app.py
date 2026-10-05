@@ -1,401 +1,518 @@
-from flask import Flask, request, redirect, url_for, jsonify
-from flask_sqlalchemy import SQLAlchemy
-import requests 
-from flask_cors import CORS
-from flask_login import UserMixin, LoginManager, login_user, logout_user, current_user, login_required
+import os
+import pickle
 from datetime import datetime
+from typing import Optional
+
 import bcrypt
-from sqlalchemy.sql import func
+import numpy as np
+import pandas as pd
+import requests
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.sessions import SessionMiddleware
+from dotenv import load_dotenv
+from database import get_db
+from models import Movie, MovieRating, User, Viewed, Watchlist
+
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+TMDB_API_KEY = os.getenv("TMDB_API_KEY")
+app = FastAPI()
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY,
+    same_site="lax",
+    https_only=False,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=".*",
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["Content-Type", "Authorization"],
+)
 
 
+# Return {"error": "..."} instead of FastAPI's default {"detail": "..."} so
+# the existing frontend error handling continues to work.
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
 
-app = Flask(__name__)
-
-CORS(app, origins=["*"],
-     supports_credentials=True,
-     allow_headers=["Content-Type", "Authorization"],
-     expose_headers=["Content-Type", "Authorization"],
-     methods=["GET", "POST", "OPTIONS"])
-
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+mysqlconnector://root:KhaTruong271206.!@localhost/user_logins'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.secret_key = 'SOME KEY'
-
-db = SQLAlchemy(app)
-
-class User(db.Model, UserMixin):
-    __tablename__ = 'users'
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(100), nullable=False)
-    email = db.Column(db.String(255), nullable=False)
-    password = db.Column(db.String(200), nullable=False)
-    watchlist = db.relationship('Movie', secondary='watchlist', backref='watchlist_users')
-    viewed = db.relationship('Movie', secondary='viewed', backref='viewed_users')
-    def __repr__(self):
-        return f'<User: {self.username}>'
-
-class Movie(db.Model):
-    __tablename__ = 'movies'
-    id = db.Column(db.Integer, primary_key = True)
-    title = db.Column(db.String(255), nullable = False)
-    overview = db.Column(db.Text)
-    poster_path = db.Column(db.String(255))
-    release_date = db.Column(db.Date)
-    ratings = db.relationship('MovieRating', backref='movie')
-
-class Watchlist(db.Model):
-    __tablename__ = 'watchlist'
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), primary_key=True)
-    movie_id = db.Column(db.Integer, db.ForeignKey('movies.id'), primary_key=True)
-    added_at = db.Column(db.DateTime, default=db.func.current_timestamp())
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse({"error": "Invalid request payload"}, status_code=400)
 
 
-class MovieRating(db.Model) :
-    __tablename__ = "movie_ratings"
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), primary_key=True)
-    movie_id = db.Column(db.Integer, db.ForeignKey('movies.id'), primary_key=True)
-    rating = db.Column(db.Integer, nullable=False)
-    rated_at = db.Column(db.DateTime, default=db.func.current_timestamp())
+# ---------- Schemas ----------
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
 
-class Viewed(db.Model) :
-    __tablename__ = "viewed"
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), primary_key = True)
-    movie_id = db.Column(db.Integer, db.ForeignKey('movies.id'), primary_key=True)
-    time_added = db.Column(db.DateTime, default=db.func.current_timestamp())
 
-login_manager = LoginManager()
-login_manager.init_app(app)
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
-    
 
-def fetchMovie(id):
-    url = f"https://api.themoviedb.org/3/movie/{id}?api_key=29dbd50df36e2810ccad7d394ef8409a"
-    response = requests.get(url)
-    if response.status_code == 200 :
-        return response.json()
+class MovieIdBody(BaseModel):
+    id: int
+
+
+class RatingUpdate(BaseModel):
+    movieID: int
+    rating: int
+
+
+# ---------- Auth ----------
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    user_id = request.session.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+# ---------- Helpers ----------
+def fetch_movie(movie_id: int) -> Optional[dict]:
+    url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMDB_API_KEY}"
+    resp = requests.get(url)
+    if resp.status_code == 200:
+        return resp.json()
     return None
 
 
-@login_manager.user_loader
-def load_user(uid):
-    return User.query.get(uid)
+def movie_to_dict(m: Movie) -> dict:
+    return {
+        "movie_id": m.id,
+        "title": m.title,
+        "overview": m.overview,
+        "poster_path": m.poster_path,
+        "release_date": m.release_date.isoformat() if m.release_date else None,
+    }
 
-@login_manager.unauthorized_handler
-def unauthorized():
-    return jsonify({"error": "Authentication required"}), 401
+
+def get_or_create_movie(db: Session, movie_id: int) -> Optional[Movie]:
+    movie = db.get(Movie, movie_id)
+    if movie:
+        return movie
+    data = fetch_movie(movie_id)
+    if not data:
+        return None
+    release_date = None
+    if data.get("release_date"):
+        release_date = datetime.strptime(data["release_date"], "%Y-%m-%d")
+    movie = Movie(
+        id=movie_id,
+        title=data["title"],
+        overview=data.get("overview"),
+        poster_path=data.get("poster_path"),
+        release_date=release_date,
+    )
+    db.add(movie)
+    db.commit()
+    return movie
 
 
+# ---------- Recommendation data (loaded once at import) ----------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+movies_path = os.path.join(BASE_DIR, "movies_list.pkl")
+similarity_path = os.path.join(BASE_DIR, "similarity.pkl")
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    if current_user.is_authenticated:
-        return jsonify({"status": "logged_in", "username": current_user.username})
+movies_df: Optional[pd.DataFrame] = None
+similarity: Optional[np.ndarray] = None
+movies_list = []
+
+try:
+    print("Loading pickle files...")
+    with open(movies_path, "rb") as f:
+        movies_df = pickle.load(f)
+    with open(similarity_path, "rb") as f:
+        similarity = pickle.load(f)
+
+    if not isinstance(movies_df, pd.DataFrame):
+        print("Error: movies_list.pkl should contain a pandas DataFrame")
+        movies_df = None
     else:
-        return jsonify({"status": "not_logged_in"})
+        movies_list = movies_df["title"].values
+        print(f"Loaded {len(movies_df)} movies successfully")
 
-@app.route('/api/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        data = request.get_json()
-        username = data.get('username')
-        password = data.get('password')
-        email = data.get('email')
-        
-        if not username or not password or not email:
-            return jsonify({"error": "Missing required fields"}), 400
-        
-        if User.query.filter_by(username=username).first():
-            return jsonify({"error": "Username already exists"}), 409
-            
-        if User.query.filter_by(email=email).first():
-            return jsonify({"error": "Email already exists"}), 409
-
-        hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        
-        new_user = User(username=username, email=email, password=hashed_pw)
-        db.session.add(new_user)
-        db.session.commit()
-        
-        return jsonify({"message": "Registration successful"}), 201
+    if not isinstance(similarity, np.ndarray):
+        print("Error: similarity.pkl should contain a numpy array")
+        similarity = None
     else:
-        return jsonify({"message": "Registration form"}), 200
+        print(f"Similarity matrix shape: {similarity.shape}")
+except FileNotFoundError as e:
+    print(f"Error loading pickle files: {e}")
+except Exception as e:
+    print(f"Error loading pickle files: {e}")
 
 
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-    
-    user = User.query.filter_by(username=username).first()
-    
-    if not user or not bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
-        return jsonify({"error": "Invalid credentials"}), 401
-    
-    login_user(user)
-    
-    return jsonify({
+def fetch_poster(movie_id: int) -> Optional[str]:
+    try:
+        url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMDB_API_KEY}&language=en-US"
+        resp = requests.get(url)
+        if resp.status_code == 200:
+            poster_path = resp.json().get("poster_path")
+            if poster_path:
+                return f"https://image.tmdb.org/t/p/w500{poster_path}"
+        return None
+    except Exception as e:
+        print(f"Error fetching poster for movie {movie_id}: {e}")
+        return None
+
+
+# ---------- Routes ----------
+@app.get("/")
+@app.post("/")
+def index(request: Request, db: Session = Depends(get_db)):
+    user_id = request.session.get("user_id")
+    if user_id:
+        user = db.get(User, user_id)
+        if user:
+            return {"status": "logged_in", "username": user.username}
+    return {"status": "not_logged_in"}
+
+
+@app.get("/api/register")
+def register_form():
+    return {"message": "Registration form"}
+
+
+@app.post("/api/register")
+def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+    if db.query(User).filter_by(username=payload.username).first():
+        raise HTTPException(status_code=409, detail="Username already exists")
+    if db.query(User).filter_by(email=payload.email).first():
+        raise HTTPException(status_code=409, detail="Email already exists")
+
+    hashed_pw = bcrypt.hashpw(
+        payload.password.encode("utf-8"), bcrypt.gensalt()
+    ).decode("utf-8")
+    user = User(username=payload.username, email=payload.email, password=hashed_pw)
+    db.add(user)
+    db.commit()
+    return JSONResponse({"message": "Registration successful"}, status_code=201)
+
+
+@app.post("/api/login")
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    user = db.query(User).filter_by(username=payload.username).first()
+    if not user or not bcrypt.checkpw(
+        payload.password.encode("utf-8"), user.password.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    request.session["user_id"] = user.id
+    return {
         "user": {
             "id": user.id,
             "username": user.username,
-            "email": user.email
+            "email": user.email,
         }
-    })
+    }
 
-@app.route('/api/user', methods=['GET'])
-@login_required
-def get_user():
-    return jsonify({
+
+@app.get("/api/user")
+def get_user(current: User = Depends(get_current_user)):
+    return {
         "user": {
-            "id": current_user.id,
-            "username": current_user.username,
-            "email": current_user.email
+            "id": current.id,
+            "username": current.username,
+            "email": current.email,
         }
-    })
-
-@app.route('/api/logout', methods=['POST'])
-@login_required
-def logout():
-    logout_user()
-    return jsonify({"message": "Successfully logged out"})
+    }
 
 
+@app.post("/api/logout")
+def logout(request: Request, current: User = Depends(get_current_user)):
+    request.session.clear()
+    return {"message": "Successfully logged out"}
 
-@app.route('/api/watchlist', methods=['GET'])
-@login_required
-def watchlist() :
-    user_id = current_user.id
-    user = User.query.get(user_id)
-    movies = [
-        {
-            'movie_id': movie.id,
-            'title': movie.title,
-            'overview': movie.overview,
-            'poster_path': movie.poster_path,
-            'release_date': movie.release_date.isoformat() if movie.release_date else None           
-        } for movie in user.watchlist
-    ] 
-    return jsonify(movies)
 
-@app.route('/api/watchlist/add', methods=['POST'])
-@login_required
-def add_to_watchlist():
-    user_id = current_user.id
-    data = request.get_json()
-    movie_id = data.get('id')
-    
-    if not movie_id:
-        return jsonify({'error': 'TMDB ID is required'}), 400
-    
-    # Check if movie exists in our database
-    movie = Movie.query.get(movie_id)
-    
-    # If movie doesn't exist in our database, fetch and create it
+@app.get("/api/watchlist")
+def watchlist(current: User = Depends(get_current_user)):
+    return [movie_to_dict(m) for m in current.watchlist]
+
+
+@app.post("/api/watchlist/add")
+def add_to_watchlist(
+    payload: MovieIdBody,
+    db: Session = Depends(get_db),
+    current: User = Depends(get_current_user),
+):
+    if not payload.id:
+        raise HTTPException(status_code=400, detail="TMDB ID is required")
+
+    movie = get_or_create_movie(db, payload.id)
     if not movie:
-        movie_data = fetchMovie(movie_id)
-        if not movie_data:
-            return jsonify({'error': 'Movie not found in TMDB'}), 404
-            
-        movie = Movie(
-            id=movie_id,
-            title=movie_data['title'],
-            overview=movie_data.get('overview'),
-            poster_path=movie_data.get('poster_path'),
-            release_date=datetime.strptime(movie_data['release_date'], '%Y-%m-%d') if movie_data.get('release_date') else None
-        )
-        db.session.add(movie)
-        db.session.commit()
-    
-    # Check if movie is already in user's watchlist
-    existing = Watchlist.query.filter_by(user_id=user_id, movie_id=movie_id).first()
+        raise HTTPException(status_code=404, detail="Movie not found in TMDB")
+
+    existing = (
+        db.query(Watchlist)
+        .filter_by(user_id=current.id, movie_id=payload.id)
+        .first()
+    )
     if existing:
-        return jsonify({'message': 'Movie already in watchlist'}), 200
-    
-    # Add to watchlist
-    watchlist_entry = Watchlist(user_id=user_id, movie_id=movie_id)
-    db.session.add(watchlist_entry)
-    db.session.commit()
-    
-    return jsonify({'message': 'Movie added to watchlist'}), 201
+        return {"message": "Movie already in watchlist"}
 
-@app.route('/api/watchlist/remove', methods=['POST'])
-@login_required
-def remove_from_watchlist():
-    user_id = current_user.id
-    data = request.get_json()
-    movie_id = data.get('id')
-    if not movie_id:
-        return jsonify({'error': 'TMDB ID is required'}), 400
-    watchlist_entry = Watchlist.query.filter_by(user_id = user_id, movie_id = movie_id).first()
-    if not watchlist_entry:
-        return jsonify({'error': 'Movie not in watchlist'}), 404
-
-    db.session.delete(watchlist_entry)
-    db.session.commit()
-    return jsonify({'message': 'Movie removed from watchlist'})
+    db.add(Watchlist(user_id=current.id, movie_id=payload.id))
+    db.commit()
+    return JSONResponse({"message": "Movie added to watchlist"}, status_code=201)
 
 
+@app.post("/api/watchlist/remove")
+def remove_from_watchlist(
+    payload: MovieIdBody,
+    db: Session = Depends(get_db),
+    current: User = Depends(get_current_user),
+):
+    if not payload.id:
+        raise HTTPException(status_code=400, detail="TMDB ID is required")
 
-@app.route('/api/rating/<int:movie_id>', methods=['GET'])
-@login_required
-def get_ratings(movie_id):
-    user_id = current_user.id
-    movie = Movie.query.get(movie_id)
+    entry = (
+        db.query(Watchlist)
+        .filter_by(user_id=current.id, movie_id=payload.id)
+        .first()
+    )
+    if not entry:
+        raise HTTPException(status_code=404, detail="Movie not in watchlist")
+
+    db.delete(entry)
+    db.commit()
+    return {"message": "Movie removed from watchlist"}
+
+
+@app.get("/api/rating/{movie_id}")
+def get_ratings(
+    movie_id: int,
+    db: Session = Depends(get_db),
+    current: User = Depends(get_current_user),
+):
+    movie = db.get(Movie, movie_id)
     if not movie:
-        return jsonify({'error': 'Movie not found'}), 404
+        raise HTTPException(status_code=404, detail="Movie not found")
 
-    user_rating = MovieRating.query.filter_by(user_id=user_id, movie_id=movie_id).first()
-    
-    return jsonify({
-        'movieID': movie_id,
-        'userRating': user_rating.rating if user_rating else None,
-    })
+    user_rating = (
+        db.query(MovieRating)
+        .filter_by(user_id=current.id, movie_id=movie_id)
+        .first()
+    )
+    return {
+        "movieID": movie_id,
+        "userRating": user_rating.rating if user_rating else None,
+    }
 
-@app.route('/api/rating/update', methods=['POST'])
-@login_required
-def update_rating():
-    user_id = current_user.id 
-    data = request.get_json()
-    
-    # Debug logging for incoming request
-    print("Received data:", data)
-    
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-    
-    movie_id = data.get('movieID')
-    rating = data.get('rating')
-    
-    print(f"Extracted values - movieID: {movie_id}, rating: {rating}")
 
-    if movie_id is None or rating is None:
-        return jsonify({'error': 'Movie ID and rating are required'}), 400
-
-    # Convert to integers for consistency
-    try:
-        movie_id = int(movie_id)
-        rating = int(rating)
-    except (ValueError, TypeError):
-        return jsonify({'error': 'Movie ID and rating must be valid numbers'}), 400
-
-    if rating < 1 or rating > 5:
-        return jsonify({'error': 'Rating must be an integer between 1 and 5'}), 400
-    
-    movie = Movie.query.get(movie_id)
-    if not movie:
-        # Movie doesn't exist in our database, fetch and create it
-        movie_data = fetchMovie(movie_id)
-        if not movie_data:
-            return jsonify({'error': 'Movie not found in TMDB'}), 404
-            
-        movie = Movie(
-            id=movie_id,
-            title=movie_data['title'],
-            overview=movie_data.get('overview'),
-            poster_path=movie_data.get('poster_path'),
-            release_date=datetime.strptime(movie_data['release_date'], '%Y-%m-%d') if movie_data.get('release_date') else None
+@app.post("/api/rating/update")
+def update_rating(
+    payload: RatingUpdate,
+    db: Session = Depends(get_db),
+    current: User = Depends(get_current_user),
+):
+    if payload.rating < 1 or payload.rating > 5:
+        raise HTTPException(
+            status_code=400, detail="Rating must be an integer between 1 and 5"
         )
-        db.session.add(movie)
-        db.session.commit()
-    
-    # Check if user has already rated this movie
-    user_rating = MovieRating.query.filter_by(user_id=user_id, movie_id=movie_id).first()
 
+    movie = get_or_create_movie(db, payload.movieID)
+    if not movie:
+        raise HTTPException(status_code=404, detail="Movie not found in TMDB")
+
+    user_rating = (
+        db.query(MovieRating)
+        .filter_by(user_id=current.id, movie_id=payload.movieID)
+        .first()
+    )
     if user_rating:
-        # Update existing rating
-        user_rating.rating = rating
+        user_rating.rating = payload.rating
         user_rating.rated_at = datetime.now()
     else:
-        # Create new rating
-        user_rating = MovieRating(user_id=user_id, movie_id=movie_id, rating=rating)
-        db.session.add(user_rating)
-
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Rating updated successfully',
-        'movieId': movie_id,
-        'userRating': rating,
-    })
-
-
-@app.route('/api/viewed', methods=['GET'])
-@login_required
-def viewed() :
-    user_id = current_user.id
-    user = User.query.get(user_id)
-    movies = [
-        {
-            'movie_id': movie.id,
-            'title': movie.title,
-            'overview': movie.overview,
-            'poster_path': movie.poster_path,
-            'release_date': movie.release_date.isoformat() if movie.release_date else None           
-        } for movie in user.viewed
-    ] 
-    return jsonify(movies)
-
-
-@app.route('/api/viewed/add', methods=['POST'])
-@login_required
-def add_to_viewed() :
-    user_id = current_user.id 
-    data = request.get_json()
-    movie_id = data.get('id')
-    
-    if not movie_id :
-                return jsonify({'error': 'TMDB ID is required'}), 400
-    
-    movie = Movie.query.get(movie_id)
-    if not movie :
-        movie_data = fetchMovie(movie_id)
-
-        movie = Movie(
-            id = movie_id,
-            title = movie_data['title'],
-            overview = movie_data.get('overview'),
-            poster_path=movie_data.get('poster_path'),
-            release_date=datetime.strptime(movie_data['release_date'], '%Y-%m-%d') if movie_data.get('release_date') else None
+        user_rating = MovieRating(
+            user_id=current.id, movie_id=payload.movieID, rating=payload.rating
         )
-    db.session.add(movie)
-    db.session.commit()
+        db.add(user_rating)
 
-    existed = Viewed.query.filter_by(user_id = user_id, movie_id = movie_id).first()
-    if existed :
-        return jsonify({'message': 'Movie already in Viewed'}), 200
-    
-    viewed_entry = Viewed(user_id=user_id, movie_id=movie_id)
-    db.session.add(viewed_entry)
-    db.session.commit()
-    
-    return jsonify({'message': 'Movie added to Viewed'}), 201
+    db.commit()
+    return {
+        "message": "Rating updated successfully",
+        "movieId": payload.movieID,
+        "userRating": payload.rating,
+    }
 
 
-@app.route('/api/viewed/remove', methods=['POST'])
-@login_required
-def remove_from_viewed() :
-    user_id = current_user.id
-    data = request.get_json()
-    movie_id = data.get('id')
-    if not movie_id:
-        return jsonify({'error': 'TMDB ID is required'}), 400
-    viewed_entry = Viewed.query.filter_by(user_id = user_id, movie_id = movie_id).first()
-    if not viewed_entry:
-        return jsonify({'error': 'Movie not in viewed'}), 404
-
-    db.session.delete(viewed_entry)
-    db.session.commit()
-    return jsonify({'message': 'Movie removed from viewed'})
+@app.get("/api/viewed")
+def viewed(current: User = Depends(get_current_user)):
+    return [movie_to_dict(m) for m in current.viewed]
 
 
+@app.post("/api/viewed/add")
+def add_to_viewed(
+    payload: MovieIdBody,
+    db: Session = Depends(get_db),
+    current: User = Depends(get_current_user),
+):
+    if not payload.id:
+        raise HTTPException(status_code=400, detail="TMDB ID is required")
+
+    movie = get_or_create_movie(db, payload.id)
+    if not movie:
+        raise HTTPException(status_code=404, detail="Movie not found in TMDB")
+
+    existed = (
+        db.query(Viewed)
+        .filter_by(user_id=current.id, movie_id=payload.id)
+        .first()
+    )
+    if existed:
+        return {"message": "Movie already in Viewed"}
+
+    db.add(Viewed(user_id=current.id, movie_id=payload.id))
+    db.commit()
+    return JSONResponse({"message": "Movie added to Viewed"}, status_code=201)
 
 
+@app.post("/api/viewed/remove")
+def remove_from_viewed(
+    payload: MovieIdBody,
+    db: Session = Depends(get_db),
+    current: User = Depends(get_current_user),
+):
+    if not payload.id:
+        raise HTTPException(status_code=400, detail="TMDB ID is required")
+
+    entry = (
+        db.query(Viewed)
+        .filter_by(user_id=current.id, movie_id=payload.id)
+        .first()
+    )
+    if not entry:
+        raise HTTPException(status_code=404, detail="Movie not in viewed")
+
+    db.delete(entry)
+    db.commit()
+    return {"message": "Movie removed from viewed"}
 
 
-    
+@app.get("/api/recommendations")
+def recommend(
+    movie: Optional[str] = None,
+    current: User = Depends(get_current_user),
+):
+    if movies_df is None or similarity is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Movie recommendation data not available. Please check if movies_list.pkl and similarity.pkl files exist.",
+        )
+    if not movie:
+        raise HTTPException(status_code=400, detail="Movie parameter is required")
+
+    print(f"Looking for movie: '{movie}'")
+    matches = movies_df[movies_df["title"].str.lower() == movie.lower()]
+
+    if matches.empty:
+        matches = movies_df[
+            movies_df["title"].str.lower().str.contains(movie.lower(), na=False)
+        ]
+        if matches.empty:
+            available = movies_df["title"].tolist()[:10]
+            return JSONResponse(
+                {
+                    "error": f'Movie "{movie}" not found in dataset',
+                    "suggestion": "Try one of these available movies",
+                    "available_movies": available,
+                },
+                status_code=404,
+            )
+
+    index = matches.index[0]
+    print(f"Found movie at index: {index}")
+    if index >= len(similarity):
+        raise HTTPException(
+            status_code=500, detail="Movie index out of bounds in similarity matrix"
+        )
+
+    scores = similarity[index]
+    distance = sorted(list(enumerate(scores)), reverse=True, key=lambda x: x[1])
+
+    recommendations = []
+    for i in distance[1:6]:
+        try:
+            data = movies_df.iloc[i[0]]
+            movie_id = data.get("id", None)
+            rec = {
+                "title": data["title"],
+                "similarity_score": round(float(i[1]), 3),
+            }
+            if movie_id:
+                rec["id"] = int(movie_id)
+                poster_url = fetch_poster(movie_id)
+                if poster_url:
+                    rec["poster"] = poster_url
+            recommendations.append(rec)
+        except Exception as e:
+            print(f"Error processing recommendation {i[0]}: {e}")
+            continue
+
+    return {
+        "selected_movie": movie,
+        "recommendations": recommendations,
+        "user_id": current.id,
+    }
 
 
+@app.get("/api/movies")
+def get_movies_list(search: str = ""):
+    if movies_df is None:
+        raise HTTPException(status_code=500, detail="Movie data not available")
 
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    if search:
+        filtered = movies_df[
+            movies_df["title"].str.lower().str.contains(search.lower(), na=False)
+        ]
+        titles = filtered["title"].tolist()
+    else:
+        titles = movies_list.tolist()[:100]
+
+    return {"movies": titles, "total": len(titles)}
+
+
+@app.get("/api/movie/{movie_title}")
+def get_movie_details(
+    movie_title: str, current: User = Depends(get_current_user)
+):
+    if movies_df is None:
+        raise HTTPException(status_code=500, detail="Movie data not available")
+
+    data = movies_df[movies_df["title"].str.lower() == movie_title.lower()]
+    if data.empty:
+        raise HTTPException(status_code=404, detail="Movie not found")
+
+    movie = data.iloc[0]
+    details = {"title": movie["title"]}
+    if "id" in movie and pd.notna(movie["id"]):
+        details["id"] = int(movie["id"])
+        poster_url = fetch_poster(details["id"])
+        if poster_url:
+            details["poster"] = poster_url
+
+    return details
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app:app", host="0.0.0.0", port=5000, reload=True)
